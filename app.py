@@ -52,7 +52,7 @@ class Capture:
         self.started = time.time()
         self.holistic = mp.solutions.holistic.Holistic(
             static_image_mode=False, model_complexity=1,
-            enable_segmentation=False, refine_face_landmarks=True,
+            enable_segmentation=False, refine_face_landmarks=False,
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
 
@@ -60,7 +60,7 @@ class Capture:
     def pack(points):
         if points is None:
             return None
-        return [[round(p.x, 5), round(p.y, 5), round(p.z, 5), round(p.visibility, 4)]
+        return [[round(p.x, 5), round(p.y, 5), round(p.z, 5)]
                 for p in points.landmark]
 
     def process(self, frame):
@@ -69,9 +69,9 @@ class Capture:
         if timestamp is None:
             timestamp = time.monotonic()
         image = frame.to_ndarray(format="bgr24")
-        # Cap frame dimensions to keep CPU, memory, and in-memory video size manageable.
+        # Retain enough resolution for hand and lower-body landmarks while bounding memory.
         h, w = image.shape[:2]
-        scale = min(1.0, 720 / max(h, w))
+        scale = min(1.0, 960 / max(h, w))
         if scale < 1:
             image = cv2.resize(image, (int(w * scale), int(h * scale)))
         # VP8 requires even frame dimensions.
@@ -80,7 +80,6 @@ class Capture:
         result = self.holistic.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         points = {
             "pose": self.pack(result.pose_landmarks),
-            "face": self.pack(result.face_landmarks),
             "left_hand": self.pack(result.left_hand_landmarks),
             "right_hand": self.pack(result.right_hand_landmarks),
         }
@@ -129,10 +128,10 @@ def overlay_video(frames: list[np.ndarray], landmarks: list[dict], timestamps: l
     holistic = mp.solutions.holistic
     drawer = mp.solutions.drawing_utils
     specs = [
-        ("pose", holistic.POSE_CONNECTIONS, (255, 70, 70), 3, 5),
-        ("face", mp.solutions.face_mesh.FACEMESH_TESSELATION, (60, 220, 255), 1, 2),
-        ("left_hand", holistic.HAND_CONNECTIONS, (60, 255, 80), 3, 6),
-        ("right_hand", holistic.HAND_CONNECTIONS, (220, 70, 255), 3, 6),
+        # OpenCV draws BGR tuples: pose orange, left hand green, right hand magenta.
+        ("pose", holistic.POSE_CONNECTIONS, (0, 145, 255), 3, 6),
+        ("left_hand", holistic.HAND_CONNECTIONS, (0, 255, 0), 3, 8),
+        ("right_hand", holistic.HAND_CONNECTIONS, (255, 0, 255), 3, 8),
     ]
     rendered = []
     for frame, coords in zip(frames, landmarks):
@@ -141,9 +140,10 @@ def overlay_video(frames: list[np.ndarray], landmarks: list[dict], timestamps: l
             raw = coords.get(key)
             if not raw:
                 continue
+            # Leave visibility unset. Hand landmarks have no meaningful visibility
+            # field; setting its default (0) causes MediaPipe drawing to hide them.
             lm = landmark_pb2.NormalizedLandmarkList(
-                landmark=[landmark_pb2.NormalizedLandmark(
-                    x=p[0], y=p[1], z=p[2], visibility=p[3]) for p in raw]
+                landmark=[landmark_pb2.NormalizedLandmark(x=p[0], y=p[1], z=p[2]) for p in raw]
             )
             drawer.draw_landmarks(out, lm, connections,
                 landmark_drawing_spec=drawer.DrawingSpec(color=color, thickness=-1, circle_radius=dot_radius),
@@ -185,11 +185,14 @@ def public_page():
     context = webrtc_streamer(
         key="asl-recorder", mode=WebRtcMode.SENDRECV,
         video_frame_callback=capture.process,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints={
+            "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}, "frameRate": {"ideal": 30}},
+            "audio": False,
+        },
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         async_processing=True,
     )
-    st.caption("Select START to open your camera. Your live camera preview will appear here without landmarks. When you finish signing, select STOP, then save the recording.")
+    st.caption("Select START to open your camera. For best landmarks, frame your full body and keep both hands visible. Your preview has no overlays. When you finish signing, select STOP, then save the recording.")
     if not context.state.playing:
         with capture.lock:
             ready = len(capture.frames) > 0
@@ -246,7 +249,7 @@ def admin_page():
             with st.container(border=True):
                 st.markdown(f"**{item['sentence']}**")
                 st.video(item["video"], format="video/webm", width="stretch")
-                st.caption("Landmarks overlaid: pose, face, left hand, and right hand")
+                st.caption("Landmarks overlaid: pose, left hand, and right hand")
                 good, reject = st.columns(2)
                 with good:
                     if st.button("✓ Approve", key=f"approve_{item['id']}", use_container_width=True):

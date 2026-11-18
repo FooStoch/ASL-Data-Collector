@@ -18,7 +18,7 @@ Users can switch between the Deaf user and Developer review pages using the side
 
 ## Recording and storage notes
 
-The browser camera requires HTTPS and camera permission. The app uses WebRTC to receive video frames and show a live preview, runs MediaPipe Holistic for pose, face, and both hands, then saves one WebM review clip with the landmarks overlaid plus the per-frame landmark data in process-wide in-memory queues. `packages.txt` installs the Linux OpenCV runtime libraries required by the OpenCV build used with MediaPipe.
+The browser camera requires HTTPS and camera permission. The app uses WebRTC to receive video frames and show a live preview, runs MediaPipe Holistic for pose and both hands, then saves one WebM review clip with the landmarks overlaid plus the per-frame landmark data in process-wide in-memory queues. `packages.txt` installs the Linux OpenCV runtime libraries required by the OpenCV build used with MediaPipe.
 
 Records are in memory only. They disappear when the server restarts or sleeps, as expected for this proof of concept. They are shared across browser sessions while they use the same running app process, but are not durable and would not be shared across multiple server replicas. Streamlit Community Cloud needs WebRTC/STUN connectivity; some restrictive networks may block the live camera stream.
 
