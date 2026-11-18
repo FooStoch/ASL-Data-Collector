@@ -1,4 +1,4 @@
-streamlit>=1.48,<2
+streamlit>=1.62,<2
 streamlit-webrtc>=0.63,<1
 av>=12,<17
 mediapipe==0.10.21
