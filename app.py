@@ -5,6 +5,7 @@ import random
 import threading
 import time
 import uuid
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -47,6 +48,7 @@ class Capture:
         self.lock = threading.Lock()
         self.frames: list[np.ndarray] = []
         self.landmarks: list[dict] = []
+        self.timestamps: list[float] = []
         self.started = time.time()
         self.holistic = mp.solutions.holistic.Holistic(
             static_image_mode=False, model_complexity=1,
@@ -62,6 +64,10 @@ class Capture:
                 for p in points.landmark]
 
     def process(self, frame):
+        # Preserve the camera/WebRTC timeline before landmark processing takes time.
+        timestamp = frame.time
+        if timestamp is None:
+            timestamp = time.monotonic()
         image = frame.to_ndarray(format="bgr24")
         # Cap frame dimensions to keep CPU, memory, and in-memory video size manageable.
         h, w = image.shape[:2]
@@ -81,22 +87,35 @@ class Capture:
         with self.lock:
             self.frames.append(image.copy())
             self.landmarks.append(points)
+            self.timestamps.append(timestamp)
         return frame
 
 
-def make_video(frames: list[np.ndarray]) -> bytes:
+def make_video(frames: list[np.ndarray], timestamps: list[float]) -> bytes:
     if not frames:
         return b""
     height, width = frames[0].shape[:2]
     output = io.BytesIO()
     with av.open(output, mode="w", format="webm") as container:
-        stream = container.add_stream("libvpx", rate=15)
+        # 30 fps is the nominal stream rate; explicit frame PTS values preserve the
+        # camera's actual timing, including frames arriving at a different cadence.
+        stream = container.add_stream("libvpx", rate=30)
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
         stream.options = {"crf": "30", "b": "0"}
-        for image in frames:
+        time_base = Fraction(1, 1000)
+        stream.codec_context.time_base = time_base
+        stream.time_base = time_base
+        origin = timestamps[0] if timestamps else 0.0
+        last_pts = -1
+        for index, image in enumerate(frames):
             video_frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+            elapsed = timestamps[index] - origin if index < len(timestamps) else index / 30
+            pts = max(last_pts + 1, round(max(0.0, elapsed) * 1000))
+            video_frame.pts = pts
+            video_frame.time_base = time_base
+            last_pts = pts
             for packet in stream.encode(video_frame):
                 container.mux(packet)
         for packet in stream.encode():
@@ -104,21 +123,21 @@ def make_video(frames: list[np.ndarray]) -> bytes:
     return output.getvalue()
 
 
-def overlay_video(frames: list[np.ndarray], landmarks: list[dict]) -> bytes:
+def overlay_video(frames: list[np.ndarray], landmarks: list[dict], timestamps: list[float]) -> bytes:
     if not frames:
         return b""
     holistic = mp.solutions.holistic
     drawer = mp.solutions.drawing_utils
     specs = [
-        ("pose", holistic.POSE_CONNECTIONS, (80, 220, 90)),
-        ("face", mp.solutions.face_mesh.FACEMESH_TESSELATION, (210, 170, 70)),
-        ("left_hand", holistic.HAND_CONNECTIONS, (255, 120, 40)),
-        ("right_hand", holistic.HAND_CONNECTIONS, (40, 160, 255)),
+        ("pose", holistic.POSE_CONNECTIONS, (255, 70, 70), 3, 5),
+        ("face", mp.solutions.face_mesh.FACEMESH_TESSELATION, (60, 220, 255), 1, 2),
+        ("left_hand", holistic.HAND_CONNECTIONS, (60, 255, 80), 3, 6),
+        ("right_hand", holistic.HAND_CONNECTIONS, (220, 70, 255), 3, 6),
     ]
     rendered = []
     for frame, coords in zip(frames, landmarks):
         out = frame.copy()
-        for key, connections, color in specs:
+        for key, connections, color, line_width, dot_radius in specs:
             raw = coords.get(key)
             if not raw:
                 continue
@@ -127,10 +146,10 @@ def overlay_video(frames: list[np.ndarray], landmarks: list[dict]) -> bytes:
                     x=p[0], y=p[1], z=p[2], visibility=p[3]) for p in raw]
             )
             drawer.draw_landmarks(out, lm, connections,
-                landmark_drawing_spec=drawer.DrawingSpec(color=color, thickness=1, circle_radius=1),
-                connection_drawing_spec=drawer.DrawingSpec(color=color, thickness=1, circle_radius=1))
+                landmark_drawing_spec=drawer.DrawingSpec(color=color, thickness=-1, circle_radius=dot_radius),
+                connection_drawing_spec=drawer.DrawingSpec(color=color, thickness=line_width, circle_radius=dot_radius))
         rendered.append(out)
-    return make_video(rendered)
+    return make_video(rendered, timestamps)
 
 
 @st.cache_resource
@@ -178,10 +197,11 @@ def public_page():
             with capture.lock:
                 frames = capture.frames[:]
                 landmarks = capture.landmarks[:]
+                timestamps = capture.timestamps[:]
             with st.spinner("Saving video and extracting landmarks…"):
                 try:
                     # Save a single WebM clip with the landmark visualization composited on it.
-                    video = overlay_video(frames, landmarks)
+                    video = overlay_video(frames, landmarks, timestamps)
                     item = {"id": uuid.uuid4().hex, "sentence": st.session_state.sentence,
                             "video": video, "landmarks": landmarks,
                             "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}
