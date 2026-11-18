@@ -5,7 +5,7 @@ A Streamlit proof of concept for collecting English sentence / ASL signing pairs
 ## Deploy to Streamlit Community Cloud
 
 1. Commit `app.py`, `requirements.txt`, and `Random English Sentences.txt` to GitHub. The app selects a random non-empty line from the corpus.
-2. Create a Community Cloud app using this repository and set the main file path to `app.py`. In **Advanced settings**, choose Python **3.12**; MediaPipe 0.10.21 publishes a Linux wheel for Python 3.12. The requirements pin Streamlit to 1.62 or later because earlier releases can have an ASGI media/range response issue that prevents browser video playback.
+2. Create a Community Cloud app using this repository and set the main file path to `app.py`. In **Advanced settings**, choose Python **3.12**; MediaPipe 0.10.21 publishes a Linux wheel for Python 3.12. The requirements pin Streamlit 1.60.0 to keep its protobuf dependency compatible with MediaPipe 0.10.21, and constrain Starlette below 1.4.0 to avoid an ASGI middleware incompatibility.
 3. In the app's **Settings → Secrets** field, paste (replace the sample with a long unique password):
 
 ```toml
