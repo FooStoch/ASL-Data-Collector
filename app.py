@@ -1,14 +1,13 @@
 ﻿from __future__ import annotations
 
 import io
-import json
 import random
-import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 
+import av
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -69,6 +68,9 @@ class Capture:
         scale = min(1.0, 720 / max(h, w))
         if scale < 1:
             image = cv2.resize(image, (int(w * scale), int(h * scale)))
+        # VP8 requires even frame dimensions.
+        image = image[: image.shape[0] - image.shape[0] % 2,
+                      : image.shape[1] - image.shape[1] % 2]
         result = self.holistic.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         points = {
             "pose": self.pack(result.pose_landmarks),
@@ -86,15 +88,20 @@ def make_video(frames: list[np.ndarray]) -> bytes:
     if not frames:
         return b""
     height, width = frames[0].shape[:2]
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
-        writer = cv2.VideoWriter(tmp.name, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, (width, height))
-        if not writer.isOpened():
-            raise RuntimeError("Could not initialize video encoder on this server.")
-        for frame in frames:
-            writer.write(frame)
-        writer.release()
-        tmp.seek(0)
-        return tmp.read()
+    output = io.BytesIO()
+    with av.open(output, mode="w", format="webm") as container:
+        stream = container.add_stream("libvpx", rate=15)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        stream.options = {"crf": "30", "b": "0"}
+        for image in frames:
+            video_frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+            for packet in stream.encode(video_frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return output.getvalue()
 
 
 def overlay_video(frames: list[np.ndarray], landmarks: list[dict]) -> bytes:
@@ -134,7 +141,7 @@ def get_store():
 
 def init_state():
     st.session_state.store = get_store()
-    defaults = {"sentence": None, "capture": None, "capture_sentence": None}
+    defaults = {"sentence": None, "capture": None}
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
@@ -147,24 +154,23 @@ def public_page():
         st.session_state.sentence = choose_sentence()
     st.markdown("### Sentence to sign")
     st.markdown(f"<div style='font-size:1.65rem; font-weight:650; padding:1rem; border-radius:0.7rem; background:#f0f2f6'>{st.session_state.sentence}</div>", unsafe_allow_html=True)
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        if st.button("Choose another sentence", use_container_width=True):
-            st.session_state.sentence = choose_sentence()
-            st.rerun()
-    st.markdown("### Record your signing")
     if st.session_state.capture is None:
         st.session_state.capture = Capture()
-        st.session_state.capture_sentence = st.session_state.sentence
     capture = st.session_state.capture
+    with capture.lock:
+        has_frames = bool(capture.frames)
+    if st.button("Choose another sentence", use_container_width=True, disabled=has_frames):
+        st.session_state.sentence = choose_sentence()
+        st.rerun()
+    st.markdown("### Record your signing")
     context = webrtc_streamer(
-        key="asl-recorder", mode=WebRtcMode.SENDONLY,
+        key="asl-recorder", mode=WebRtcMode.SENDRECV,
         video_frame_callback=capture.process,
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         async_processing=True,
     )
-    st.caption("Select START to open your camera. Sign the sentence, then select STOP. Your camera preview is shown to you; landmarks are not drawn on this page.")
+    st.caption("Select START to open your camera. Your live camera preview will appear here without landmarks. When you finish signing, select STOP, then save the recording.")
     if not context.state.playing:
         with capture.lock:
             ready = len(capture.frames) > 0
@@ -174,21 +180,21 @@ def public_page():
                 landmarks = capture.landmarks[:]
             with st.spinner("Saving video and extracting landmarks…"):
                 try:
-                    video = make_video(frames)
-                    item = {"id": uuid.uuid4().hex, "sentence": st.session_state.capture_sentence,
-                            "video": video, "frames": frames, "landmarks": landmarks,
+                    # Save a single WebM clip with the landmark visualization composited on it.
+                    video = overlay_video(frames, landmarks)
+                    item = {"id": uuid.uuid4().hex, "sentence": st.session_state.sentence,
+                            "video": video, "landmarks": landmarks,
                             "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}
                     st.session_state.store["pending"].append(item)
                     st.session_state.capture.holistic.close()
                     st.session_state.capture = None
-                    st.session_state.capture_sentence = None
                     st.session_state.sentence = choose_sentence()
                     st.success("Saved for developer review. You can start the next sentence whenever you are ready.")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not save this recording: {exc}")
-    elif st.button("Finish recording", type="primary", use_container_width=True):
-        st.info("Select STOP in the camera controls first, then choose Finish and save recording.")
+    else:
+        st.info("When you finish signing, select STOP in the camera controls. The save button will then appear.")
 
 
 def admin_page():
@@ -219,13 +225,8 @@ def admin_page():
         for item in list(st.session_state.store["pending"]):
             with st.container(border=True):
                 st.markdown(f"**{item['sentence']}**")
-                if item["video"]:
-                    st.video(item["video"], format="video/mp4", width="stretch")
-                try:
-                    st.video(overlay_video(item["frames"], item["landmarks"]), format="video/mp4", width="stretch")
-                    st.caption("Landmark overlay: pose, face, left hand, and right hand")
-                except Exception as exc:
-                    st.warning(f"Overlay could not be rendered: {exc}")
+                st.video(item["video"], format="video/webm", width="stretch")
+                st.caption("Landmarks overlaid: pose, face, left hand, and right hand")
                 good, reject = st.columns(2)
                 with good:
                     if st.button("✓ Approve", key=f"approve_{item['id']}", use_container_width=True):
@@ -241,11 +242,8 @@ def admin_page():
         for item in st.session_state.store["approved"]:
             with st.container(border=True):
                 st.markdown(f"**{item['sentence']}**")
-                try:
-                    st.video(overlay_video(item["frames"], item["landmarks"]), format="video/mp4", width="stretch")
-                    st.caption("Approved video with landmark overlay")
-                except Exception as exc:
-                    st.warning(f"Overlay could not be rendered: {exc}")
+                st.video(item["video"], format="video/webm", width="stretch")
+                st.caption("Approved video with landmark overlay")
                 st.caption(f"Recorded {item['created']}")
 
 
