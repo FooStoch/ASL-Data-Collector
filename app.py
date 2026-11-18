@@ -129,9 +129,9 @@ def overlay_video(frames: list[np.ndarray], landmarks: list[dict], timestamps: l
     drawer = mp.solutions.drawing_utils
     specs = [
         # OpenCV draws BGR tuples: pose orange, left hand green, right hand magenta.
-        ("pose", holistic.POSE_CONNECTIONS, (0, 145, 255), 3, 6),
-        ("left_hand", holistic.HAND_CONNECTIONS, (0, 255, 0), 3, 8),
-        ("right_hand", holistic.HAND_CONNECTIONS, (255, 0, 255), 3, 8),
+        ("pose", holistic.POSE_CONNECTIONS, (0, 145, 255), 2, 4),
+        ("left_hand", holistic.HAND_CONNECTIONS, (0, 255, 0), 2, 6),
+        ("right_hand", holistic.HAND_CONNECTIONS, (255, 0, 255), 2, 6),
     ]
     rendered = []
     for frame, coords in zip(frames, landmarks):
